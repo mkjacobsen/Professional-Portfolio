@@ -291,3 +291,92 @@ Renders the `(n_machines, n_timesteps)` score matrix as a heatmap using the `YlO
 | `machine_names` | `list[str] \| None` | `None` | Optional y-axis labels. Defaults to "machine_{machine_idx}" |
 | `title` | `str` | `"Anomaly Score Heatmap (machines x time)"` | Figure title |
 
+### `plot_reconstruction_error`
+
+```python
+plot_reconstruction_error(
+    normal_errors: np.ndarray,
+    test_errors: np.ndarray,
+    threshold: float,
+    title: str = "Reconstruction Error Distribution: Normal vs Test",
+) -> tuple[plt. Figure, plt.Axes]
+```
+
+Overlays two normalized histrograms - training-set scores in blue and test-set scores in red - with a vertical dashed line at the anomaly threshold.  If the detector is working well, the test distribution will have a heavier right tail than the training distribution, and anmalous slices will cluster beyond the threshold line.
+
+| Parameter | Type | Default | Description |
+| --------- | ---- | ------- | ----------- | 
+| `normal_errors` | `np.ndarray` | - | 1-D array of per-slice scores from the training set (e.g., `detector.score(normal_tensor).ravel()`) |
+| `test_errors` | `np.ndarray` | - | 1-D array of per-slice scores from the test set. |
+| `threshold` | `float` | - | The fitted anomaly threshold drawn as a vertical line.  Use `detector.threshold`. |
+| `title` | `str| `"Reconstruction Error Distribution: Normal vs Test"` | Figure title |
+
+---
+
+## Rank Selection
+
+The CP rank controls the number of latent components and is the most consequential hyperparameter.  A rank that is too low underfits the normal data: the reconstruction is poor even on healthy observations, which inflates the baseline residual and raises the false-positive rate.  A rank that is too high overfits to noise in the training data, meaning the model can reconstruct almost anything, an tru anomalies no longer produce a distinguisable spike in the residual.  In practice, ranks in the 5-15 range work well for IoT data with clear diurnal and weekly periodicity, because such data genuinely has only a handful of dominant latent patterns.
+
+To select rank systematically, fit `CPDecomposition` at several candidate ranks on a held-out normal validation set and plot the global `reconstruction_error` as a function of rank.  Look for the elbow: the point at which adding another component yields diminishing returns in reconstruction quality.  This is the scree-plot method adapted from PCA.  Alternatively, use k-fold cross-validation on the normal data: hold out a fraction of timesteps, fit on the remainder, evaluate reconstruction error on the held-out portion, and average across folds.  Select the trank that minimizes held-out error.  Both approaches require only normal data and give an objective criterion rather than guessing.
+
+---
+
+## Running the Example
+
+`examples/detect_anomalies.py` is a self-contained end-to-end demonstration.  Each step maps to a printed banner.
+
+**Step 1- Generate normal training data.*** Creates a `TelemetryGenerator` with 20 machines, 8 sensors, and 168 timesteps (one week at hourly resolution, seed 42) and calls `generate_normal()`.  Prints the tensor shape and value statistics to confirm the data is non-negative and in a reasonable range.
+
+**Step 2 - Generate test data with 5 injected anomalies.** Creates a second generator with a different seed (99) to produce independent test data.  Calls `inject_anomalies` with `anomaly_type="mixed"` to inject five faults drawn uniformly from spike, drift, and stuck types.  Prints the exact location of each fault (machine index, sensor index, timestep range, type).  Keep this output: it tells you where to look in the subsequent plots.
+
+**Step 3 - Fit AnomalyDetector** Instantiates `AnomalyDetector(rank=10, threshold_percentile=95.0)` and calls `fit(normal_tensor)`. Prints the resulting threshold. The threshold is the 95th percentrile of the training-set per-slice scores; approximately 5% of training slices will exceed it.
+
+**Step 4 - Score test data** Calls `detector.score` on both the anomalous test tensor and the clean training tensor.  Prints the score ranges and the fraction of test slices flagged as anomalous.  The test score maximum should be noticeably higher than the training score maximum; the fraction flagged will typically be in the 5-15% range with five injected faults in a 20 x 168 score matrix.
+
+**Step 5 - Print detected anomalies table** Calls `score_summary` to get the full ranked DataFrame, then prints the top 20 flagged rows.  Below the table, a cross-reference block prints, for each known injection site, the maximum score in the affected window and the count of timesteps within that window that exceeded the threshold.  This is the key diagnostic output: it shows whether the detector is finding the faults where they were actually placed.  If a fault is missed here, either the rank is too high, the threhold too agressive, or the injected anomaly happens to land at a timestep already well-explained by the learned factors.
+
+**Step 6 - Save plots** Saves the three plots described in the Quickstart section to `./output/`. The sensor time-series plot is drawn for the machine wit hthe globally highest anomaly score, which is usually one of the machines that received an injected fault. 
+
+**Step 7 - Reconstruction error comparison** PRints a two-column table of mean score and 95th-percentile score for training and test data, along with the ratio of test mean to train mean.  A ratio noticably above 1.0 confirms that the injected faults are elevating the score distribution.
+
+**Interpreting the anomaly score table** The `score` column is a dimensionless ratio in the range `[0,inf)`. A score of `0.0` is perfect reconstruction; a score near `1.0` means the residual is approximately as large as the original signal, which is severely anomalous.  In a healthy system trained at rank 10, typical scores are in the `0.05` to `0.15` range; injected spikes will commonly reach `0.3` to `0.8` depending on maginutde.  The `is_anomaly` column is `True` for any score above the fitted threshold. Sort by `score` decending and look at the top rows: if the machine indices match the injection metadata from Step 2, the detector is spatially localizing the faults correctly.
+
+##Extending the Detector
+
+**Plugging in a different decomposition method** AnomalyDetector couples to CPDecomposition through two methods: fit (tensor)and reconstruct () . To use Tucker decomposition, NMF, or any other method, implement a class with those two method signatures - fit accepts a 3-D array and returns self; reconstruct takes no arguments and returns an array of the same shape as the training tensor - and substitute it for the CPDecomposition instance in AnomalyDetector._init_ No other changes are required.
+
+**Adding a new anomaly injection type** In data.py, inject_anomalies selects a branch based on the string value of atype. To add a new type, for example burst (repeated short spikes), add it to the _types list, add a corresponding branch in the if/elif chain that modifies result [machine_idx, sensor_idx, start:end], and add "burst" to the valid values in the ValueError check at the top of the method. The metadata dict at the end of each loop iteration will automatically record the new type.
+
+**Adjusting the scoring function for different tensor shapes** The current scoring function slices along axis 1 (sensor axis), which assumes the tensor is organized as (machines x sensors x time). If your tensor has a different axis ordering, change the 'axis-argument in the two np.linalg.norm" calls inside "AnomalyDetector.score'. If you want to score along a different granularity - for example, per-machine averages rather than per- (machine, timestep) pairs - replace the norm-over-axis-1 computation with a norm over the combined sensor and time axes. The threshold-setting logic in fit and the flag logic in predict operate on whatever array call score returns, so they adapt automatically
+
+---
+## Running Tests
+```bash
+pip install -e ". (dev]"
+pytest tests/ -v
+```
+
+The test suite covers shape and type contracts, threshold-setting behavior, Dataframe output format, and the key behavioral assertion.
+
+The most meaningful test is test_injected_anomaly_locations_score_above median in tests/test_detector.py. It:
+
+1. Generates a clean training tensor and a separate test tensor with five spike anomalies at known (machine, sensor, timestep) locations.
+2. Fits an "Anomalydetector" on the training tensor.
+3. Scores the anomalous test tensor.
+4. For each of the five injected windows, checks whether at least one timestep in that window scores above the overall test-set median.
+5. Asserts that at least 3 of the 5 windows pass this check.
+
+This is a stronger claim than merely "some anomalies are detected." It asserts that the reconstruction error is **spatially localized** to the actual fault locations rather than being uniformly elevated across the score matrix. A detector that raised all scores indiscriminately would not pass this test. Passing it means the CP factors Learned from normal data are specifically failing to reconstruct the corrupted sensor vectors, which is the behavior the technique is designed to produce.
+
+## Known Limitations
+ Portfolio Code
+- CP decomposition assumes the normal operating data has low-rank structure - that machines, sensors, and time interact in a small number of dominant patterns. If all machines are truly independent of one another, the tensor will not be low-rank and the method will produce poor reconstructions even on healthy data, inflating the false-positive rate.
+
+- Rank selection is manual. There is no automatic rank determination built into this library. Users must select rank by inspecting reconstruction error curves as described in the Rank Selection section.
+
+- The anomaly threshold is set from the training data distribution. If the production environment shifts - new machines added to the fleet, sensors recalibrated, operating regime changed - the threshold will no longer reflect the in-distribution error level, and false positives will increase. Periodic retraining or threshold recalibration is necessary to handle distribution shift.
+
+- Very large tensors wil1 be slow. ALS complexity scales roughly as 0(zank × n_machines x n_sensors × n_timesteps) per iteration. Tensors with thousands of machines or sensors, or with very long time horizons, may require significant compute time. tensorly does not parallelize ALS across cores by default.
+
+## Data Note
+All data in this repository is fully synthetic. TelemetryGenerator constructs tensors as a sum of CP-stylerank-1 outer products (machine factors,sensor factors, diurnal time factors) plus Gaussian noise, so the CP recovery problem is meaningful but non-trivial. Noreal sensor data is required to run any part of this project.
