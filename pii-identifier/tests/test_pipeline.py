@@ -87,4 +87,103 @@ class TestIdentifyRegexOnly:
         assert offsets == sorted(offsets)
 
 # Regex Only Redact Function
+class TestRedact:
+    def test_ssn_redacted(self, regex_only):
+        text = "SSN: 123-45-6789"
+        redacted = regex_only.redact(text)
+        assert "123-45-6789" not in redacted
+        assert " (REDACTED) " in redacted
 
+    def test_email_redacted(self, regex_only):
+        text = "Email: user@domain.com"
+        redacted = regex_only.redact(text)
+        assert "user@domain.com" not in redacted
+
+    def test_custom_replacement(self, regex_only):
+        text = "Phone: 800-555-1234"
+        redacted = regex_only.redact(text, replacement="****")
+        assert "800-555-1234" not in redacted
+        assert "****" in redacted
+
+    def test_multiple_pii_all_redacted(self,regex_only):
+        text = "Name: John Doe, SSN: 111-22-3333, email: jftest.com"
+        redacted = regex_only.redact(text)
+        assert "111-22-3333" not in redacted
+        assert "jftest.com" not in redacted
+
+    def test_non_pii_preserved(self, regex_only):
+        text = "The salary is $90,000 per year."
+        redacted = regex_only.redact(text)
+        assert "90,000" in redacted
+        assert "per year" in redacted
+
+# Overlap Resolution: Regex Wins
+@pytest.mark.requires_spacy_model
+class TestOverlapResolutionWithNER:
+    def test_regex_beats_ner_on_overlap(self):
+        """When regex and NER both fire on the same span, only the 
+        regex match should survive in the merged output."""
+        ident = PIIIdentifier(use_ner=True)
+
+        #Craft a text where SSN might accidentally be detected by NER too.
+        text = "Social Security Number: 456-78-9012"
+        matches = ident.identify(text)
+
+        ssn_matches = [m for m in matches if m.pii_type == PIIType.SSN]
+        assert len(ssn_matches) >= 1
+
+        #None of the matches covering the SSN span should be NER-sourced
+        ssn_match = ssn_matches[0]
+        overlapping = [
+            m for m in matches
+            if m.method == DetectionMethod.NER
+            and max(m.start, ssn_match.start) < min(m.end, ssn_match.end)
+        ]
+        assert overlapping == [], (
+            f"NER match(es) overlap the regex SSN match: {overlapping}"
+        )
+
+class TestSpansOverlapHelper:
+    """Pure unit tests for the _spans_overlap utility - no spacy needed"""
+    def _make(self, start: int, end: int) -> PIIMatch:
+        return PIIMatch(
+            pii_type = PIIType.SSN, text="x",
+            start = start, 
+            end = end,
+            method = DetectionMethod.REGEX, 
+            confidence = 1.0
+        )
+
+    def test_overlapping(self):
+        assert _spans_overlap(self._make(0, 10), self._make(5, 15))
+        assert _spans_overlap(self._make(5, 15), self._make(0, 10))
+
+    def test_adjacent_does_not_overlap(self):
+        assert not _spans_overlap(self._make(0, 5), self._make(5, 10))
+
+    def test_completely_separate(self):
+        assert not _spans_overlap(self._make(0, 5), self._make(10, 20))
+
+    def test_containment_overlaps (self):
+        assert _spans_overlap(self._make(0, 20), self._make(5, 10))
+
+# report () - uses regex_only fixture (no spacy needed)
+class TestReport:
+    def test_report_structure(self, regex_only):
+        text = "SSN: 123-45-6789"
+        report = regex_only.report(text)
+        assert "matches" in report
+        assert "pii_types_found" in report
+        assert "total_count" in report
+        assert "redacted_text" in report
+
+    def test_report_counts_match (self, regex_only):
+        text = "Phone: 800-555-1234 email: a@b.com"
+        report = regex_only.report(text)
+        assert report["total_count"] == len(report["matches"])
+
+    def test_report_types_are_strings(self, regex_only):
+        text = "SSN: 111-22-3333"
+        report = regex_only.report(text)
+        for t in report["pii_types_found"]:
+            assert isinstance(t, str)

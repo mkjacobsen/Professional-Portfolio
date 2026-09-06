@@ -83,4 +83,71 @@ class TestIntakeForm:
     def test_two_phones(self, injector):
         """Employee phone + emergency contact phone - two PHONE entries."""
         _, gt = injector.intake_form()
-        
+        phone_entries = [e for e in gt if e["pii_type"] == "phone"]
+        assert len(phone_entries) >= 2
+
+# Background Check Consent
+
+class TestBackgroundCheckConsent:
+
+    def test_ground_truth_offsets_are_correct(self, injector):
+        doc, gt = injector.background_check_consent()
+        _check_ground_truth(doc, gt)
+
+    def test_expected_pii_types_present(self, injector):
+        _, gt = injector.background_check_consent()
+        types = {entry["pii_type"] for entry in gt}
+        assert "person_name" in types
+        assert "ssn" in types
+        assert "date_or_birth" in types
+        assert "address" in types
+        assert "organization" in types
+
+    def test_ssn_format(self, injector):
+        """SSN in the document must match the canonical format"""
+        import re
+        doc, gt = injector.background_check_consent()
+        ssn_entries = [e for e in gt if e["pii_type"] == "ssn"]
+        assert len(ssn_entries) >= 1
+        for entry in ssn_entries:
+            assert re.fullmatch(r"\d{3}-\d{2}-\d{4}", entry["text"]), (
+                f"Invalid SSN format: {entry['text']!r}"
+            )
+
+# Batch Generation
+
+class TestGenerateBatch:
+    def test_returns_correct_count(self, injector):
+        batch = injector.generate_batch(n=5)
+        assert len(batch) == 5
+
+    def test_all_tuples_have_correct_structure(self, injector):
+        batch = injector.generate_batch(n=3)
+        for doc, gt in batch:
+            assert isinstance(doc, str)
+            assert isinstance(gt, list)
+            assert len(gt) > 0
+
+    def test_offsets_correct_for_all_in_batch(self, injector):
+        batch = injector.generate_batch(n=6)
+        for doc, gt in batch:
+            _check_ground_truth(doc, gt)
+
+    def test_different_doc_types_produces(self, injector):
+        """With enough samples, all three doc types should appear."""
+        # Each doc type has a header keyword we can detect.
+        keywords = (
+            "OFFER OF EMPLOYMENT",
+            "EMPLOYEE INTAKE FORM",
+            "BACKGROUND CHECK AUTHORIZATION",
+        )
+
+        batch = injector.generate_batch(n=30)
+        found = set()
+        for doc, _ in batch:
+            for kw in keywords:
+                if kw in doc: 
+                    found.add(kw)
+
+        assert found == keywords, f"Not all doc types generated: {found}"
+
