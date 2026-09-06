@@ -18,7 +18,5 @@ The portfolio includes work across data science, machine learning, and software 
 - NLP sentiment analysis and topic modeling
 - PII identification and synthetic healthcare data generation
 - Tensor anomaly detection and time-series forecasting
-- Resume generation and job-description matching
-- Stock tracking, analysis, and dashboard tooling
 
 These projects are being reviewed and expanded with clearer context, implementation details, tests, examples, and results as the renovation progresses.
