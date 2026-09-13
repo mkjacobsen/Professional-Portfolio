@@ -299,3 +299,100 @@ def main():
     gb_card.risk_factors = gb_factors
     print(f"LR risk score : {lr_risk:.1f} / 100 {scorer.risk_label(lr_risk)})")
     print(f"GB risk score : {gb_risk:.1f} / 100 {scorer.risk_label(gb_risk)})")
+    print()
+
+    # Re-register cards with risk scores baked in
+    _, lr_card_loaded = registry.get(lr_id)
+    lr_card_loaded.risk_score = lr_risk
+    lr_card_loaded.risk_factors = lr_factors
+    Path(REGISTRY_DIR / "cards" / f"{lr_id}.json").write_text(
+        lr_card_loaded.to_json(), encoding="utf-8"
+    )
+
+    _, gb_card_loaded = registry.get(gb_id)
+    gb_card_loaded.risk_score = gb_risk
+    gb_card_loaded.risk_factors = gb_factors
+    Path(REGISTRY_DIR / "cards" / f"{gb_id}.json").write_text(
+        gb_card_loaded.to_json(), encoding="utf-8"
+    )
+
+    # 6. Reports
+
+    print("=" * 60)
+    print("Generating HTML Reports")
+    print("=" * 60)
+
+    reporter = ReportGenerator(TEMPLATE_DIR)
+
+    lr_report = OUTPUT_DIR / f"model_report_lr_{lr_id[:8]}.html"
+    gb_report = OUTPUT_DIR / f"model_report_gb_{gb_id[:8]}.html"
+
+    reporter.generate(lr_card, lr_report, shap_figure=lr_shap_fig)
+    reporter.generate(gb_card, gb_report, shap_figure=gb_shap_fig)
+
+    print(f"  LR report : {lr_report}")
+    print(f"  GB report : {gb_report}")
+    print()
+
+    # 7. Compare
+
+    print("=" * 60)
+    print("Model Comparison")
+    print("=" * 60)
+
+    comparison = registry.compare(lr_id, gb_id)
+    ma = comparison["model_a"]
+    mb = comparison["model_b"]
+    delta = comparison["delta"]
+
+    header = f"{'Metric':<22} {'LR':>10} {'GB':>10} {'Delta':>10}"
+    print(f"  {header}")
+    print("  " + "-" * 54)
+    for key in ["gini", "roc_auc", "ks_statistic", "f1", "accuracy", "risk_score"]:
+        v_a = ma.get(key)
+        v_b = mb.get(key)
+        d = delta.get(key)
+        v_a_str = f"{v_a:.4f}" if v_a is not None else "N/A"
+        v_b_str = f"{v_b:.4f}" if v_b is not None else "N/A"
+        d_str = f"{d:.4f}" if d is not None else "N/A"
+
+        print(f". {key:<22} {v_a_str:>10} {v_b_str:>10} {d:>10}")
+    print()
+
+    # 8. Promote Winner
+    print("=" * 60)
+    print("8. Promote Winner to production, archive loser")
+    print("=" * 60)
+
+    # Lower risk score = better; use Gini as tiebreaker
+    if gb_risk < lr_risk or (gb_risk == lr_risk and gb_card.performance.gini > lr_card.performance.gini):
+        winner_id, winner_name = gb_id, "GradientBoostingClassifier"
+        loser_id, loser_name = lr_id, "LogisticRegression"
+    else:
+        winner_id, winner_name = lr_id, "LogisticRegression"
+        loser_id, loser_name = gb_id, "GradientBoostingClassifier"
+
+    registry.update_status(winner_id, "production")
+    registry.update_status(loser_id, "archived")
+
+    print(f"  Promoted : {winner_name} ({winner_id[:8]}.....) -> production")
+    print(f"  Archived : {loser_name} ({loser_id[:8]}....) -> archived")
+    print()
+
+    # Final Listing
+    print("=" * 60)
+    print("Registry Summary")
+    print("=" * 60)
+
+    for entry in registry.list_models():
+        print(
+            f"  [{entry.status:10s}] {entry.model_name} {entry.version}"
+            f"(id={entry.model_id[:8]}...)"
+        )
+
+    print()
+    print("Done. Open the HTML reports in a browser or print to PDF.")
+
+if __name__ == "__main__":
+    main()
+    
